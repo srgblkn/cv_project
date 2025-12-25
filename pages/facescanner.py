@@ -1,42 +1,163 @@
 # pages/facescanner.py
 from __future__ import annotations
 
+import base64
 import io
 import json
 import zipfile
 from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from pathlib import Path
+from typing import List, Tuple
 
 import numpy as np
+import pandas as pd
 import streamlit as st
 from PIL import Image, ImageFilter, ImageDraw
 
-# Убедитесь, что ultralytics установлен в requirements.txt
+# ultralytics YOLO
 try:
     from ultralytics import YOLO
 except Exception:
     YOLO = None
 
+# YAML (опционально)
+try:
+    import yaml  # pyyaml
+except Exception:
+    yaml = None
 
-# -----------------------------
-# Конфигурация страницы
-# -----------------------------
+
+# =============================
+# Paths (relative to this file)
+# =============================
+THIS_DIR = Path(__file__).resolve().parent
+FB_DIR = THIS_DIR / "facebook"
+
+DEFAULT_WEIGHTS = FB_DIR / "best-13.pt"
+DEFAULT_ARGS_YAML = FB_DIR / "args.yaml"
+DEFAULT_RESULTS_CSV = FB_DIR / "results.csv"
+DEFAULT_BG_JPG = FB_DIR / "background.jpg"
+
+
+# =============================
+# Page config
+# =============================
 st.set_page_config(
-    page_title="FaceScanner (YOLO) — маскировка лиц",
+    page_title="FaceScanner — маскировка лиц",
     page_icon="🕵️",
     layout="wide",
 )
 
-st.title("FaceScanner (YOLO) — детекция и маскировка лиц")
-st.caption(
-    "Загрузка нескольких файлов, детекция YOLO и маскировка области лица. "
-    "Веса можно заменить без изменения кода."
-)
+
+# =============================
+# Styling (background + opaque cards)
+# =============================
+def _apply_background_and_theme(bg_path: Path):
+    """
+    Ставит фон и повышает контраст/читабельность:
+    - фон: jpg
+    - сайдбар и ключевые контейнеры: непрозрачные
+    """
+    if bg_path.exists():
+        b64 = base64.b64encode(bg_path.read_bytes()).decode("utf-8")
+        bg_css = f"""
+        .stApp {{
+            background-image: url("data:image/jpeg;base64,{b64}");
+            background-size: cover;
+            background-position: center;
+            background-attachment: fixed;
+        }}
+        """
+    else:
+        bg_css = ""
+
+    css = f"""
+    <style>
+    {bg_css}
+
+    /* Общий контраст текста */
+    .stApp, .stMarkdown, .stText, .stCaption, .stWrite {{
+        color: #F8FAFC;
+    }}
+
+    /* Header прозрачный/минимальный */
+    header[data-testid="stHeader"] {{
+        background: rgba(0,0,0,0);
+    }}
+
+    /* Sidebar: тёмный непрозрачный */
+    section[data-testid="stSidebar"] {{
+        background: #0B1220;
+        border-right: 1px solid rgba(255,255,255,0.08);
+    }}
+    section[data-testid="stSidebar"] * {{
+        color: #F8FAFC !important;
+    }}
+
+    /* "Карточки" (мы будем использовать HTML-блоки) */
+    .opaque-card {{
+        background: #0B1220;
+        border: 1px solid rgba(255,255,255,0.10);
+        border-radius: 18px;
+        padding: 16px 16px 14px 16px;
+        box-shadow: 0 10px 24px rgba(0,0,0,0.35);
+        margin-bottom: 14px;
+    }}
+    .opaque-card h3, .opaque-card h4, .opaque-card p {{
+        color: #F8FAFC;
+        margin: 0;
+    }}
+    .opaque-card .muted {{
+        color: rgba(248,250,252,0.80);
+        margin-top: 6px;
+    }}
+
+    /* Expander: непрозрачный */
+    div[data-testid="stExpander"] > details {{
+        background: #0B1220;
+        border: 1px solid rgba(255,255,255,0.10);
+        border-radius: 18px;
+        padding: 10px 12px;
+        box-shadow: 0 10px 24px rgba(0,0,0,0.25);
+    }}
+    div[data-testid="stExpander"] summary {{
+        color: #F8FAFC !important;
+        font-weight: 600;
+    }}
+
+    /* File uploader and inputs: непрозрачные */
+    div[data-testid="stFileUploader"] section {{
+        background: #0B1220;
+        border: 1px solid rgba(255,255,255,0.10);
+        border-radius: 18px;
+        padding: 10px;
+    }}
+    div[data-testid="stNumberInput"] div,
+    div[data-testid="stSlider"] div {{
+        background: transparent;
+    }}
+
+    /* Buttons */
+    .stButton > button {{
+        border-radius: 14px;
+        border: 1px solid rgba(255,255,255,0.12);
+    }}
+
+    /* Links (если будут) */
+    a {{
+        color: #93C5FD !important;
+    }}
+    </style>
+    """
+    st.markdown(css, unsafe_allow_html=True)
 
 
-# -----------------------------
-# Вспомогательные структуры
-# -----------------------------
+_apply_background_and_theme(DEFAULT_BG_JPG)
+
+
+# =============================
+# Data structures
+# =============================
 @dataclass
 class MaskConfig:
     mode: str  # "Blur" | "Pixelate" | "Solid"
@@ -46,42 +167,16 @@ class MaskConfig:
     padding: float = 0.10  # расширение бокса (10%)
 
 
-# -----------------------------
-# Проверки окружения
-# -----------------------------
-def show_runtime_info():
-    with st.sidebar.expander("Среда выполнения", expanded=True):
-        st.write("**YOLO/Ultralytics**:", "OK" if YOLO is not None else "Не найден (проверь requirements)")
-        try:
-            import torch
-
-            st.write("**PyTorch**:", torch.__version__)
-            st.write("**CUDA доступна**:", bool(torch.cuda.is_available()))
-            if torch.cuda.is_available():
-                st.write("**GPU**:", torch.cuda.get_device_name(0))
-        except Exception as e:
-            st.write("**PyTorch**: недоступен")
-            st.caption(f"Детали: {e}")
-
-
-show_runtime_info()
-
-
-# -----------------------------
-# Загрузка модели (кэш)
-# -----------------------------
+# =============================
+# Helpers
+# =============================
 @st.cache_resource(show_spinner=False)
 def load_yolo_model(weights_path: str):
     if YOLO is None:
-        raise RuntimeError(
-            "Пакет ultralytics не доступен. Проверь requirements.txt и установку зависимостей."
-        )
+        raise RuntimeError("ultralytics не установлен. Проверьте requirements.txt.")
     return YOLO(weights_path)
 
 
-# -----------------------------
-# Обработка боксов и маскировка
-# -----------------------------
 def expand_box_xyxy(x1, y1, x2, y2, w, h, pad: float):
     bw = x2 - x1
     bh = y2 - y1
@@ -95,9 +190,6 @@ def expand_box_xyxy(x1, y1, x2, y2, w, h, pad: float):
 
 
 def apply_mask_pil(img: Image.Image, boxes_xyxy: List[Tuple[int, int, int, int]], cfg: MaskConfig) -> Image.Image:
-    """
-    Маскируем области по списку боксов xyxy.
-    """
     out = img.copy()
     w, h = out.size
 
@@ -113,7 +205,10 @@ def apply_mask_pil(img: Image.Image, boxes_xyxy: List[Tuple[int, int, int, int]]
             roi_masked = roi.filter(ImageFilter.GaussianBlur(radius=int(cfg.blur_radius)))
         elif cfg.mode == "Pixelate":
             ps = max(2, int(cfg.pixel_size))
-            small = roi.resize((max(1, roi.size[0] // ps), max(1, roi.size[1] // ps)), resample=Image.NEAREST)
+            small = roi.resize(
+                (max(1, roi.size[0] // ps), max(1, roi.size[1] // ps)),
+                resample=Image.NEAREST,
+            )
             roi_masked = small.resize(roi.size, resample=Image.NEAREST)
         else:  # Solid
             roi_masked = Image.new("RGB", roi.size, cfg.solid_color)
@@ -130,42 +225,80 @@ def draw_boxes_pil(img: Image.Image, boxes_xyxy: List[Tuple[int, int, int, int]]
     return out
 
 
-def yolo_predict_boxes(
-    model,
-    img_rgb: np.ndarray,
-    conf: float,
-    iou: float,
-    max_det: int,
-) -> List[Tuple[int, int, int, int]]:
-    """
-    Возвращает боксы xyxy (int) для всех детекций.
-    (Для face-модели обычно класс один, так что фильтр классов не нужен.)
-    """
-    # ultralytics ожидает np.uint8 HWC RGB
+def yolo_predict_boxes(model, img_rgb: np.ndarray, conf: float, iou: float, max_det: int) -> List[Tuple[int, int, int, int]]:
     results = model.predict(img_rgb, conf=conf, iou=iou, max_det=max_det, verbose=False)
     if not results:
         return []
-
     r0 = results[0]
     if r0.boxes is None or len(r0.boxes) == 0:
         return []
-
     xyxy = r0.boxes.xyxy.detach().cpu().numpy()
-    boxes = []
-    for x1, y1, x2, y2 in xyxy:
-        boxes.append((int(round(x1)), int(round(y1)), int(round(x2)), int(round(y2))))
-    return boxes
+    return [(int(round(x1)), int(round(y1)), int(round(x2)), int(round(y2))) for x1, y1, x2, y2 in xyxy]
 
 
-# -----------------------------
-# Sidebar: настройки
-# -----------------------------
-st.sidebar.header("Настройки FaceScanner")
+def opaque_card(title: str, text: str):
+    st.markdown(
+        f"""
+        <div class="opaque-card">
+          <h3>{title}</h3>
+          <p class="muted">{text}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
+
+def safe_switch_page(target: str):
+    if hasattr(st, "switch_page"):
+        try:
+            st.switch_page(target)
+        except Exception:
+            st.info("Навигация недоступна в текущей среде. Используйте меню слева.")
+    else:
+        st.info("Навигация недоступна в текущей версии Streamlit. Используйте меню слева.")
+
+
+# =============================
+# Header
+# =============================
+st.markdown(
+    """
+    <div class="opaque-card">
+      <h3>FaceScanner</h3>
+      <p class="muted">Маскировка лиц на изображениях: пакетная загрузка, детекция YOLO, скачивание результата одним архивом.</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+top_left, top_right = st.columns([1, 1], gap="large")
+with top_left:
+    if st.button("← На главную", use_container_width=True):
+        safe_switch_page("app.py")
+with top_right:
+    if DEFAULT_BG_JPG.exists():
+        st.download_button(
+            "Скачать фон (JPG)",
+            data=DEFAULT_BG_JPG.read_bytes(),
+            file_name=DEFAULT_BG_JPG.name,
+            mime="image/jpeg",
+            use_container_width=True,
+        )
+    else:
+        st.caption(f"Фон не найден: `{DEFAULT_BG_JPG.as_posix()}`")
+
+
+# =============================
+# Sidebar: settings & artifacts
+# =============================
+st.sidebar.markdown("## Настройки")
+st.sidebar.caption("Параметры инференса и маскировки.")
+
+# Веса: по умолчанию берем из pages/facebook/best-13.pt
 weights_path = st.sidebar.text_input(
-    "Путь к весам YOLO (локально в репо)",
-    value="models/face_yolo.pt",
-    help="Рекомендуется хранить веса локально (не в git). Можно заменить файл — страница продолжит работать.",
+    "Веса YOLO (pt)",
+    value=DEFAULT_WEIGHTS.as_posix(),
+    help="Файл должен существовать в репозитории (например, pages/facebook/best-13.pt).",
 )
 
 conf_th = st.sidebar.slider("Confidence threshold", 0.05, 0.95, 0.25, 0.05)
@@ -173,9 +306,8 @@ iou_th = st.sidebar.slider("IoU threshold", 0.10, 0.90, 0.50, 0.05)
 max_det = st.sidebar.number_input("Max detections per image", min_value=1, max_value=500, value=50, step=1)
 
 st.sidebar.divider()
-st.sidebar.subheader("Маскировка")
-
-mask_mode = st.sidebar.selectbox("Режим маскировки", ["Blur", "Pixelate", "Solid"], index=0)
+st.sidebar.markdown("### Маскировка")
+mask_mode = st.sidebar.selectbox("Режим", ["Blur", "Pixelate", "Solid"], index=0)
 padding = st.sidebar.slider("Padding бокса (расширение)", 0.0, 0.5, 0.10, 0.02)
 
 blur_radius = 12
@@ -187,7 +319,6 @@ if mask_mode == "Blur":
 elif mask_mode == "Pixelate":
     pixel_size = st.sidebar.slider("Pixel size", 2, 40, 12, 1)
 else:
-    # базовые цвета без лишней сложности
     color_name = st.sidebar.selectbox("Цвет заливки", ["Black", "White", "Gray"], index=0)
     solid_color = {"Black": (0, 0, 0), "White": (255, 255, 255), "Gray": (120, 120, 120)}[color_name]
 
@@ -199,88 +330,127 @@ mask_cfg = MaskConfig(
     padding=padding,
 )
 
+st.sidebar.divider()
+st.sidebar.markdown("## Артефакты обучения")
+st.sidebar.caption("Автоподхват из pages/facebook/")
 
-# -----------------------------
-# Основной UI: загрузка файлов
-# -----------------------------
-left, right = st.columns([1.2, 1.0], gap="large")
+st.sidebar.write(f"• args.yaml: `{DEFAULT_ARGS_YAML.name}`", "✅" if DEFAULT_ARGS_YAML.exists() else "❌")
+st.sidebar.write(f"• results.csv: `{DEFAULT_RESULTS_CSV.name}`", "✅" if DEFAULT_RESULTS_CSV.exists() else "❌")
+st.sidebar.write(f"• weights: `{Path(weights_path).name}`", "✅" if Path(weights_path).exists() else "❌")
+
+
+# =============================
+# Main: upload & run
+# =============================
+left, right = st.columns([1.25, 1.0], gap="large")
 
 with left:
-    st.subheader("1) Загрузка изображений")
+    opaque_card("Загрузка изображений", "Поддерживается пакетная загрузка (несколько файлов за раз).")
+
     uploads = st.file_uploader(
-        "Загрузите изображения (можно несколько)",
+        "Файлы изображений",
         type=["png", "jpg", "jpeg", "bmp", "tif", "tiff"],
         accept_multiple_files=True,
+        label_visibility="collapsed",
     )
 
-    run_btn = st.button("Запустить детекцию и маскировку", type="primary", use_container_width=True)
-
+    run_btn = st.button("Запустить обработку", type="primary", use_container_width=True)
 
 with right:
-    st.subheader("2) Информация о модели (шаблон + опциональный отчёт)")
-    st.caption("Здесь держим данные об обучении, качестве и рекомендациях (обязательное требование проекта).")
+    opaque_card("Информация о модели", "Метрики и параметры обучения подгружаются из files: args.yaml и results.csv.")
 
-    report_file = st.file_uploader(
-        "Если есть отчёт в JSON — загрузите сюда (необязательно)",
-        type=["json"],
-        accept_multiple_files=False,
-        help="Например: epochs, train_size, val_size, mAP, PR-curve (ссылки/файлы), confusion matrix и т.п.",
-        key="facescanner_report",
-    )
-
-    report = None
-    if report_file is not None:
-        try:
-            report = json.loads(report_file.read().decode("utf-8"))
-        except Exception as e:
-            st.error(f"Не удалось прочитать JSON: {e}")
-
-    with st.expander("Информация о модели / обучении / метриках", expanded=True):
-        if report:
-            st.json(report)
+    with st.expander("Параметры обучения (args.yaml)", expanded=True):
+        if DEFAULT_ARGS_YAML.exists():
+            if yaml is None:
+                st.warning("PyYAML не установлен. Добавьте `pyyaml>=6.0` в requirements.txt.")
+                st.code(DEFAULT_ARGS_YAML.read_text(encoding="utf-8", errors="ignore"))
+            else:
+                try:
+                    args_data = yaml.safe_load(DEFAULT_ARGS_YAML.read_text(encoding="utf-8", errors="ignore"))
+                    st.json(args_data)
+                except Exception as e:
+                    st.error(f"Не удалось прочитать args.yaml: {e}")
         else:
-            c1, c2 = st.columns(2)
-            with c1:
-                st.markdown("**Обучение**")
-                st.write("- Эпохи: TBD")
-                st.write("- Размер train: TBD")
-                st.write("- Размер val: TBD")
-            with c2:
-                st.markdown("**Метрики**")
-                st.write("- mAP@0.5: TBD")
-                st.write("- PR curve: TBD")
-                st.write("- Confusion matrix: TBD")
+            st.info(f"Файл не найден: `{DEFAULT_ARGS_YAML.as_posix()}`")
 
-            st.markdown("**Рекомендации**")
-            st.write("- Подобрать conf/iou под задачу и данные.")
-            st.write("- Для прототипа сохранять веса каждые 2–5 эпох.")
-            st.write("- При ложных срабатываниях — дообучение на собственных примерах + баланс данных.")
+    with st.expander("Качество по эпохам (results.csv)", expanded=True):
+        if DEFAULT_RESULTS_CSV.exists():
+            try:
+                df = pd.read_csv(DEFAULT_RESULTS_CSV)
+                st.caption("Сводка по обучению (лог Ultralytics).")
+
+                # Найдем полезные колонки “как получится” (Ultralytics иногда меняет имена)
+                cols = {c.lower(): c for c in df.columns}
+                epoch_col = cols.get("epoch", None)
+
+                # Кандидаты на метрику “лучше всего”
+                map5095 = None
+                map50 = None
+                for c in df.columns:
+                    cl = c.lower()
+                    if "map50-95" in cl or "map50_95" in cl or "map50-95(b)" in cl:
+                        map5095 = c
+                    if "map50" in cl and map5095 is None:
+                        map50 = c
+
+                score_col = map5095 or map50
+                if epoch_col and score_col:
+                    best_idx = int(df[score_col].astype(float).idxmax())
+                    best_epoch = int(df.loc[best_idx, epoch_col])
+                    best_score = float(df.loc[best_idx, score_col])
+                    st.success(f"Лучшая эпоха по `{score_col}`: epoch={best_epoch}, score={best_score:.4f}")
+
+                # Покажем ключевые линии, если есть
+                plot_candidates = []
+                for key in ["precision", "recall", "map50", "map50-95", "box_loss", "cls_loss", "dfl_loss"]:
+                    for c in df.columns:
+                        if key in c.lower():
+                            plot_candidates.append(c)
+
+                plot_candidates = list(dict.fromkeys(plot_candidates))[:6]  # до 6 графиков
+
+                if epoch_col and plot_candidates:
+                    import matplotlib.pyplot as plt
+
+                    for c in plot_candidates:
+                        fig = plt.figure()
+                        plt.plot(df[epoch_col], df[c])
+                        plt.xlabel("epoch")
+                        plt.ylabel(c)
+                        plt.title(c)
+                        st.pyplot(fig, clear_figure=True)
+                else:
+                    st.dataframe(df.tail(20), use_container_width=True)
+
+            except Exception as e:
+                st.error(f"Не удалось прочитать results.csv: {e}")
+        else:
+            st.info(f"Файл не найден: `{DEFAULT_RESULTS_CSV.as_posix()}`")
 
 
-# -----------------------------
-# Исполнение: инференс по загрузкам
-# -----------------------------
+# =============================
+# Run inference
+# =============================
 if run_btn:
     if not uploads:
-        st.warning("Сначала загрузите хотя бы один файл.")
+        st.warning("Загрузите хотя бы один файл.")
         st.stop()
 
     if YOLO is None:
-        st.error("Ultralytics не установлен. Проверьте requirements.txt и установку зависимостей.")
+        st.error("ultralytics не установлен. Проверьте requirements.txt.")
         st.stop()
 
-    # Загружаем модель
-    with st.spinner("Загружаю YOLO модель..."):
-        try:
-            model = load_yolo_model(weights_path)
-        except Exception as e:
-            st.error(
-                "Не удалось загрузить веса YOLO.\n\n"
-                f"Путь: `{weights_path}`\n\n"
-                f"Ошибка: {e}\n\n"
-                "Проверьте, что файл весов существует (например, положите его в папку `models/`)."
-            )
-            st.stop()
+    weights_file = Path(weights_path)
+    if not weights_file.exists():
+        st.error(
+            "Файл весов не найден.\n\n"
+            f"Путь: `{weights_file.as_posix()}`\n\n"
+            "Проверьте, что `best-13.pt` лежит в `pages/facebook/` и закоммичен/задеплоен."
+        )
+        st.stop()
+
+    with st.spinner("Загружаю модель..."):
+        model = load_yolo_model(weights_file.as_posix())
 
     st.success("Модель загружена. Обрабатываю изображения...")
 
@@ -302,17 +472,15 @@ if run_btn:
             )
 
             masked = apply_mask_pil(img, boxes, mask_cfg)
-            boxed = draw_boxes_pil(img, boxes)  # исходник с боксами
+            boxed = draw_boxes_pil(img, boxes)
 
-            # сохраняем в память
             buf_masked = io.BytesIO()
             masked.save(buf_masked, format="PNG")
             buf_masked.seek(0)
 
-            out_name = f"{up.name.rsplit('.', 1)[0]}_masked.png"
+            out_name = f"{Path(up.name).stem}_masked.png"
             results_for_zip.append((out_name, buf_masked.getvalue()))
 
-            # для превью
             preview_rows.append((up.name, img, boxed, masked, len(boxes)))
 
         except Exception as e:
@@ -322,10 +490,7 @@ if run_btn:
 
     prog.empty()
 
-    # Показываем превью
-    st.divider()
-    st.subheader("Результаты")
-
+    st.markdown("### Результаты")
     for name, orig, boxed, masked, n_boxes in preview_rows:
         with st.expander(f"{name} — детекций: {n_boxes}", expanded=False):
             c1, c2, c3 = st.columns(3)
@@ -339,9 +504,7 @@ if run_btn:
                 st.markdown("**Маскировано**")
                 st.image(masked, use_container_width=True)
 
-    # ZIP для скачивания
-    st.divider()
-    st.subheader("Скачать результаты")
+    st.markdown("### Скачать")
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for fname, fbytes in results_for_zip:
@@ -349,26 +512,9 @@ if run_btn:
     zip_buf.seek(0)
 
     st.download_button(
-        label="Скачать ZIP с маскированными изображениями",
+        label="Скачать ZIP с результатами",
         data=zip_buf,
         file_name="facescanner_results.zip",
         mime="application/zip",
         use_container_width=True,
-    )
-
-
-# -----------------------------
-# Подсказка по весам
-# -----------------------------
-with st.expander("Где взять веса и как их подключить", expanded=False):
-    st.markdown(
-        """
-**Практика для проекта:**
-- Храните веса локально в `models/` (обычно не коммитим в git).
-- Для быстрого прототипа: обучили 1–3 эпохи, сохранили `models/face_yolo.pt`, проверили страницу.
-- Потом просто заменяете файл весов на более качественный — приложение продолжит работать.
-
-**Важно:**
-- Если вы используете кастомные веса (не COCO), путь в сайдбаре должен указывать на существующий файл.
-        """
     )
