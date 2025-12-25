@@ -10,34 +10,46 @@ import streamlit as st
 APP_TITLE = "Vision Suite"
 APP_SUBTITLE = "Компьютерное зрение для прикладных бизнес-сценариев"
 
-FACE_PAGE = Path("pages") / "facescanner.py"
+PAGES_DIR = Path("pages")
+
+FACE_PAGE = PAGES_DIR / "facescanner.py"
+CANCER_PAGE = PAGES_DIR / "cancer.py"
+
 HOME_SCRIPT = "app.py"
+
+
+def _as_streamlit_page_path(page_path: Path | str) -> str:
+    """
+    Streamlit ожидает путь к странице в виде строки, как в файловой структуре репозитория.
+    Важно: используем forward slashes.
+    """
+    p = Path(page_path) if isinstance(page_path, str) else page_path
+    return p.as_posix()
 
 
 def nav_button(page_path: Path | str, label: str, icon: str | None = None, *, location: str = "main"):
     """
-    Надёжная навигация без st.page_link (который у вас падает с KeyError).
+    Надёжная навигация без st.page_link.
     - Если страница существует и доступен st.switch_page -> кликабельная кнопка.
     - Иначе -> disabled + пояснение.
     """
-    page_path = Path(page_path) if isinstance(page_path, str) else page_path
+    p = Path(page_path) if isinstance(page_path, str) else page_path
     text = f"{icon} {label}" if icon else label
 
-    exists = page_path.exists()
+    exists = p.exists()
     has_switch = hasattr(st, "switch_page")
 
-    if location == "sidebar":
-        container = st.sidebar
-    else:
-        container = st
+    container = st.sidebar if location == "sidebar" else st
 
     if exists and has_switch:
         if container.button(text, use_container_width=True):
-            st.switch_page(str(page_path).replace("\\", "/"))
+            st.switch_page(_as_streamlit_page_path(p))
     else:
         container.button(text, use_container_width=True, disabled=True)
         if not exists:
-            container.caption(f"Страница не найдена: `{page_path.as_posix()}`. Проверьте, что файл закоммичен и лежит в папке `pages/`.")
+            container.caption(
+                f"Страница не найдена: `{p.as_posix()}`. Проверьте, что файл закоммичен и лежит в папке `pages/`."
+            )
         elif not has_switch:
             container.caption("Навигация недоступна в текущей версии Streamlit. Используйте меню слева.")
 
@@ -63,10 +75,11 @@ def render_header():
 
 def render_sidebar():
     st.sidebar.markdown("### Навигация")
-    st.sidebar.caption("Выберите модуль. Для бизнес-пользователя это просто инструменты и результаты.")
+    st.sidebar.caption("Выберите модуль.")
 
     st.sidebar.markdown("#### Быстрый старт")
     nav_button(FACE_PAGE, "FaceScanner — маскировка лиц", "🕵️", location="sidebar")
+    nav_button(CANCER_PAGE, "BrainScan Detect — анализ снимков", "🧠", location="sidebar")
 
     st.sidebar.divider()
     st.sidebar.markdown("#### О платформе")
@@ -98,14 +111,14 @@ def render_solution_cards():
     with a:
         st.markdown("#### 1) FaceScanner")
         st.caption("Анонимизация изображений")
-        st.write("Детекция лиц и маскировка области (blur/pixelate/заливка). Поддерживает загрузку нескольких файлов.")
+        st.write("Детекция лиц и маскировка области. Поддерживает загрузку нескольких файлов.")
         nav_button(FACE_PAGE, "Перейти", "🕵️", location="main")
 
     with b:
         st.markdown("#### 2) BrainScan Detect")
-        st.caption("Детекция опухолей мозга")
-        st.write("Детекция объектов на изображениях. Поддержка batch-загрузки и загрузки по ссылке (в этом модуле).")
-        st.button("Скоро доступно", use_container_width=True, disabled=True)
+        st.caption("Анализ снимков")
+        st.write("Модуль анализа снимков: пакетная загрузка, превью и экспорт результатов.")
+        nav_button(CANCER_PAGE, "Перейти", "🧠", location="main")
 
     with c:
         st.markdown("#### 3) Forest Segmentation")
@@ -124,7 +137,7 @@ def render_flow():
 
     with x2:
         st.markdown("**2. Обработка**")
-        st.write("Модель выполняет инференс. Настройки позволяют адаптировать точность/строгость под задачу.")
+        st.write("Модель выполняет инференс. Настройки позволяют адаптировать строгость под задачу.")
 
     with x3:
         st.markdown("**3. Результат**")
