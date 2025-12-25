@@ -1,0 +1,45 @@
+# ===== Python / venv =====
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+
+.venv/
+venv/
+ENV/
+env/
+
+# ===== Jupyter / Colab =====
+.ipynb_checkpoints/
+*.ipynb
+
+# ===== OS / IDE =====
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ===== Streamlit =====
+.streamlit/secrets.toml
+
+# ===== Data / Artifacts (обычно не коммитим) =====
+data/
+datasets/
+outputs/
+runs/
+logs/
+cache/
+tmp/
+
+# ===== Model weights (обычно большие файлы) =====
+models/*.pt
+models/*.pth
+models/*.onnx
+models/*.engine
+models/*.tflite
+
+# Если захотите коммитить маленькие веса — удалите нужные правила и используйте Git LFS для больших.
