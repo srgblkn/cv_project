@@ -1,4 +1,3 @@
-# pages/cancer.py
 import base64
 import io
 import zipfile
